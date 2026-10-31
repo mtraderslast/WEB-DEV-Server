@@ -67,10 +67,18 @@ export const kunnectRequest = async ({ gateway, method = "GET", path, data, para
         });
         return response.data;
     } catch (error) {
+        const details = error.response?.data;
+        const validation = details?.errors
+            ? Object.entries(details.errors)
+                .map(([field, messages]) => `${field}: ${[].concat(messages).join(", ")}`)
+                .join("; ")
+            : "";
+
         throw new AppError(
             502,
-            error.response?.data?.message ||
-            error.response?.data?.error ||
+            validation ||
+            details?.message ||
+            details?.error ||
             error.message ||
             "Kunnect request failed"
         );
