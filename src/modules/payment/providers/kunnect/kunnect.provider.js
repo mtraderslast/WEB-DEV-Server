@@ -47,8 +47,8 @@ export const createCheckout = async ({ order, gateway }) => {
         amount: Number(order.amount),
         merchantAccountId: creds.merchantAccountId,
         ttl: 30,
-        successUrl: `${frontendUrl}/payment-success?orderId={reference_id}`,
-        failedUrl: `${frontendUrl}/payment-cancelled?orderId={reference_id}`,
+        successUrl: `${frontendUrl}/payment-success?orderId=${reference}`,
+        failedUrl: `${frontendUrl}/payment-cancelled?orderId=${reference}`,
         tagName: order.packageDetails?.title || order.orderType,
     };
 
