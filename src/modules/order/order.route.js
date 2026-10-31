@@ -1,9 +1,9 @@
 import express from "express";
-import { capturePaymentController, createPaymentSession } from "./order.controller.js";
+import { createPaymentSession, getOrderPaymentStatus } from "./order.controller.js";
 
 const router = express.Router();
 
 router.post("/create-payment", createPaymentSession);
-router.post("/capture-payment", capturePaymentController);
+router.get("/:orderId/status", getOrderPaymentStatus);
 
 export default router;
