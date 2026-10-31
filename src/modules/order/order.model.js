@@ -1,41 +1,88 @@
 import mongoose from "mongoose";
+import { ORDER_TYPES, PAYMENT_STATUS, PROVIDER_LIST } from "../payment/payment.constants.js";
+
+const billingSchema = new mongoose.Schema(
+    {
+        firstName: { type: String, required: true, trim: true },
+        lastName: { type: String, required: true, trim: true },
+        middleName: { type: String, trim: true },
+        email: { type: String, required: true, trim: true, lowercase: true },
+        contactNumber: { type: String, required: true, trim: true },
+        address: { type: String, required: true, trim: true },
+        country: { type: String, required: true, trim: true },
+        state: { type: String, default: "N/A", trim: true },
+        city: { type: String, required: true, trim: true },
+        zipCode: { type: String, required: true, trim: true },
+        dob: { type: String, trim: true },
+    },
+    { _id: false }
+);
 
 const orderSchema = new mongoose.Schema(
     {
         customerInfo: {
-            name: { type: String, default: 'Guest' },
-            email: { type: String, default: 'Not Provided' }
+            name: { type: String, required: true, trim: true },
+            email: { type: String, required: true, trim: true, lowercase: true },
+        },
+        billing: {
+            type: billingSchema,
+            required: true,
         },
         orderType: {
             type: String,
-            enum: ['PACKAGE_ORDER', 'ADVANCE_PAYMENT'],
-            required: true
+            enum: Object.values(ORDER_TYPES),
+            required: true,
         },
         packageDetails: {
             slug: { type: String },
             tier: { type: String },
-            title: { type: String }
+            title: { type: String },
         },
         customPurpose: {
-            type: String
+            type: String,
+            trim: true,
         },
         amount: {
             type: Number,
-            required: true
+            required: true,
+            min: 0.01,
+        },
+        currency: {
+            type: String,
+            default: "USD",
+            uppercase: true,
+            trim: true,
         },
         paymentStatus: {
             type: String,
-            enum: ['PENDING', 'PAID', 'FAILED', 'CANCELLED'],
-            default: 'PENDING'
+            enum: Object.values(PAYMENT_STATUS),
+            default: PAYMENT_STATUS.PENDING,
         },
-        paymentGatewayUsed: {
+        gatewayId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Gateway",
+        },
+        provider: {
             type: String,
-            enum: ['PAYPAL', 'STRIPE', 'NONE'],
-            default: 'NONE'
+            lowercase: true,
+            enum: [...PROVIDER_LIST, "none"],
+            default: "none",
+        },
+        providerReference: {
+            type: String,
+            index: true,
         },
         transactionId: {
-            type: String
-        }
+            type: String,
+        },
+        webhookToken: {
+            type: String,
+            required: true,
+            select: false,
+        },
+        paidAt: {
+            type: Date,
+        },
     },
     {
         timestamps: true,

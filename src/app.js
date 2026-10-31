@@ -9,7 +9,8 @@ import QuotationRoute from "./modules/quotation/quotation.route.js";
 import ReviewRoutes from "./modules/reviews/review.route.js";
 import OrderRoute from "./modules/order/order.route.js";
 import GatewayRoute from "./modules/gateway/gateway.route.js";
-import WebhookRoute from "./modules/order/order.webhook.route.js";
+import WebhookRoute from "./modules/payment/payment.webhook.route.js";
+import globalErrorHandler from "./utils/globalErrorHandler.js";
 
 const createApp = (auth) => {
     const app = express();
@@ -41,6 +42,7 @@ const createApp = (auth) => {
         res.send("M traders server is running successfully");
     });
 
+    app.use(globalErrorHandler);
 
     return app;
 }

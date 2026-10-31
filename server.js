@@ -3,6 +3,7 @@ dotenv.config();
 import mongoose from "mongoose";
 import { createAuth } from "./src/lib/auth.js";
 import createApp from "./src/app.js";
+import { ensureGatewayIndexes } from "./src/modules/gateway/gateway.model.js";
 
 const PORT = process.env.PORT || 5000;
 
@@ -10,6 +11,7 @@ const startServer = async () => {
     try {
         await mongoose.connect(process.env.MONGODB_URI);
         console.log("Database connected successfully!");
+        await ensureGatewayIndexes();
 
         const auth = createAuth(mongoose.connection.getClient().db());
         const app = createApp(auth);

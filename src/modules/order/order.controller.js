@@ -1,126 +1,168 @@
+import crypto from "node:crypto";
 import catchAsync from "../../utils/catchAsync.js";
-import Gateway from "../gateway/gateway.model.js";
+import AppError from "../../utils/AppError.js";
+import Service from "../services/services.model.js";
+import { ORDER_TYPES, PAYMENT_STATUS } from "../payment/payment.constants.js";
+import {
+    createCheckoutSession,
+    getActiveGateway,
+    refreshPendingOrder,
+    validateProviderBilling,
+} from "../payment/payment.service.js";
 import Order from "./order.model.js";
-import { processPaymentGateway } from "./payment.service.js";
 
-// Helper function to check date and reset limits dynamically
-const checkAndResetDailyLimits = async () => {
-    const today = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD
+const splitName = (fullName = "") => {
+    const parts = String(fullName).trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return { firstName: "", lastName: "" };
+    return {
+        firstName: parts[0],
+        lastName: parts.length > 1 ? parts.slice(1).join(" ") : parts[0],
+    };
+};
 
-    // Find if there are any gateways whose lastResetDate is not today
-    const needsReset = await Gateway.exists({ lastResetDate: { $ne: today } });
+const normalizeBilling = (body = {}) => {
+    const billing = { ...(body.billing || {}) };
 
-    if (needsReset) {
-        console.log(`[System] New day detected (${today}). Resetting gateway volumes to 0.`);
-
-        await Gateway.updateMany(
-            { lastResetDate: { $ne: today } },
-            {
-                $set: {
-                    currentVolume: 0,
-                    lastResetDate: today
-                }
-            }
-        );
+    if (!billing.email && body.email) billing.email = body.email;
+    if (!billing.contactNumber && (body.phone || body.contactNumber)) {
+        billing.contactNumber = body.phone || body.contactNumber;
     }
+
+    if ((!billing.firstName || !billing.lastName) && body.name) {
+        const parts = splitName(body.name);
+        billing.firstName = billing.firstName || parts.firstName;
+        billing.lastName = billing.lastName || parts.lastName;
+    }
+
+    ["address", "country", "state", "city", "zipCode", "dob", "middleName"].forEach((field) => {
+        if ((billing[field] === undefined || billing[field] === "") && body[field] != null) {
+            billing[field] = body[field];
+        }
+    });
+
+    if (!billing.state) billing.state = "N/A";
+
+    return billing;
+};
+
+const resolvePackageOrder = async (packageDetails = {}) => {
+    const { slug, tier } = packageDetails;
+
+    if (!slug || !tier) {
+        throw new AppError(400, "Package slug and tier are required");
+    }
+
+    const service = await Service.findOne({ slug });
+    if (!service) {
+        throw new AppError(404, "Service not found");
+    }
+
+    const selectedPackage = service.packages.find((item) => item.tier === tier);
+    if (!selectedPackage) {
+        throw new AppError(404, "Package tier not found");
+    }
+
+    if (!selectedPackage.price || selectedPackage.price <= 0) {
+        throw new AppError(400, "Package price is invalid");
+    }
+
+    return {
+        amount: selectedPackage.price,
+        packageDetails: {
+            slug: service.slug,
+            tier: selectedPackage.tier,
+            title: selectedPackage.title,
+        },
+    };
 };
 
 export const createPaymentSession = catchAsync(async (req, res) => {
-    const { name, email, amount, orderType, packageDetails, customPurpose } = req.body;
+    const { orderType, customPurpose } = req.body;
+    const billing = normalizeBilling(req.body);
 
-    await checkAndResetDailyLimits();
-
-    // ১. Find the best active gateway based on limits and priority
-    const selectedGateway = await Gateway.findOne({
-        isActive: true,
-        $expr: { $lt: ["$currentVolume", "$limit"] }
-    }).sort({ priority: 1 });
-
-    if (!selectedGateway) {
-        return res.status(400).json({
-            success: false,
-            message: "All payment gateways are currently overloaded or unavailable."
-        });
+    if (!orderType || !Object.values(ORDER_TYPES).includes(orderType)) {
+        throw new AppError(400, "A valid orderType is required");
     }
 
-    // ২. Create the pending order in the database
+    const gateway = await getActiveGateway();
+    validateProviderBilling(gateway.provider, billing);
+
+    let amount;
+    let packageDetails;
+
+    if (orderType === ORDER_TYPES.PACKAGE_ORDER) {
+        const resolved = await resolvePackageOrder(req.body.packageDetails || {});
+        amount = resolved.amount;
+        packageDetails = resolved.packageDetails;
+    } else {
+        amount = Number(req.body.amount);
+        if (!amount || amount <= 0) {
+            throw new AppError(400, "A valid amount is required for advance payment");
+        }
+        packageDetails = req.body.packageDetails;
+    }
+
+    const customerName = `${billing.firstName} ${billing.lastName}`.trim();
     const newOrder = await Order.create({
-        customerInfo: { name, email },
+        customerInfo: {
+            name: customerName,
+            email: billing.email,
+        },
+        billing,
         orderType,
         packageDetails,
         customPurpose,
         amount,
-        paymentGatewayUsed: selectedGateway.name, // Will be 'STRIPE', 'PAYPAL' or 'ANTOM'
-        paymentStatus: 'PENDING'
+        currency: gateway.currency || "USD",
+        paymentStatus: PAYMENT_STATUS.PENDING,
+        gatewayId: gateway._id,
+        provider: gateway.provider,
+        webhookToken: crypto.randomBytes(24).toString("hex"),
     });
 
     try {
-        // ৩. Process the payment dynamically based on the selected gateway
-        const paymentDetails = await processPaymentGateway(
-            selectedGateway.name,
-            newOrder._id,
-            amount,
-            newOrder.customerInfo,
-            packageDetails
-        );
+        const paymentDetails = await createCheckoutSession(newOrder, gateway);
 
-        // ৪. Update the order with transaction ID
-        newOrder.transactionId = paymentDetails.transactionId;
+        newOrder.providerReference = paymentDetails.providerReference;
         await newOrder.save();
 
-        // ৫. Return the unified checkout URL to Next.js
         res.status(200).json({
             success: true,
             message: "Order created successfully",
             checkoutUrl: paymentDetails.checkoutUrl,
             orderId: newOrder._id,
-            gatewayUsed: selectedGateway.name
+            gatewayUsed: gateway.provider,
         });
-
     } catch (error) {
-        newOrder.paymentStatus = 'FAILED';
+        newOrder.paymentStatus = PAYMENT_STATUS.FAILED;
         await newOrder.save();
-
-        console.error(`Error with ${selectedGateway.name} Gateway:`, error.message);
-        return res.status(500).json({
-            success: false,
-            message: `Failed to initialize payment with ${selectedGateway.name}. Please try again.`
-        });
+        throw error;
     }
 });
 
-// Universal payment completion and volume tracking handler
-export const confirmPaymentAndIncreaseVolume = async (orderId, gatewayName, transactionId) => {
-    const order = await Order.findById(orderId);
-    if (!order || order.paymentStatus === 'PAID') {
-        return; // Already paid or not found
-    }
-
-    // 1. Update order status to PAID
-    order.paymentStatus = 'PAID';
-    order.transactionId = transactionId || order.transactionId;
-    await order.save();
-
-    // 2. Increment the current volume of the specific gateway used
-    await Gateway.findOneAndUpdate(
-        { name: gatewayName.toUpperCase() },
-        { $inc: { currentVolume: order.amount } }
+export const getOrderPaymentStatus = catchAsync(async (req, res) => {
+    const order = await Order.findById(req.params.orderId).select(
+        "paymentStatus provider amount currency gatewayId providerReference"
     );
-};
 
-// Endpoint for frontend capture (e.g., PayPal return)
-export const capturePaymentController = catchAsync(async (req, res) => {
-    const { orderId, token } = req.body;
-
-    const order = await Order.findById(orderId);
     if (!order) {
-        return res.status(404).json({ success: false, message: "Order not found" });
+        throw new AppError(404, "Order not found");
     }
 
-    await confirmPaymentAndIncreaseVolume(orderId, order.paymentGatewayUsed, token);
+    let current = order;
+    if (order.paymentStatus === PAYMENT_STATUS.PENDING) {
+        try {
+            current = await refreshPendingOrder(order);
+        } catch (error) {
+            console.error("Payment status refresh failed:", error.message);
+        }
+    }
 
     res.status(200).json({
         success: true,
-        message: "Payment captured and volume updated successfully"
+        data: {
+            orderId: current._id,
+            paymentStatus: current.paymentStatus,
+        },
     });
 });
